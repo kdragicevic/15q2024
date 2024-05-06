@@ -1,0 +1,88 @@
+---
+title: "conos"
+output: html_notebook
+---
+
+Author: Katarina Dragicevic (PhD student), Biotech Research and Innovation Centre, University of Copenhagen
+
+We take the cleaned Conos object from CRMetrics output. This means, once we filtered out the cells, we run more time the processing in CRMetrics pipeline to get a conos object and a UMAP with clan data. Then we use that object.
+
+```{r}
+library(CRMetrics)
+library(conos)
+
+con <- crm$con
+con$findCommunities(min.group.size = 100)
+con$plotGraph()
+```
+
+
+We can also get the same by running the full conos pipeline on the normalized count matrices:
+
+```{r}
+source("http://pklab.med.harvard.edu/rasmus/scRNA_helper.R")
+
+library(conos)
+library(pagoda2)
+con <- Conos$new(panel, n.cores=200)
+
+con <- quickConos(n.iterations = 10,
+           names(panel),
+           n.cores.p2=40,
+           n.cores.con=40, 
+           cms = unname(panel))
+
+con <- buildConosGraph(con=cone,
+                           k.conos=15, 
+                           k.self=30, 
+                           space="PCA", 
+                           ncomps=40, 
+                           n.odgenes=3e3, 
+                           matching.method="mNN", 
+                           metric="angular", 
+                           score.component.variance=T,
+                           alignment.strength=0,
+                           min.dist=0.01, 
+                           spread=14,
+                           n.iterations=10)
+
+con$plotGraph()
+```
+
+
+The cell clusters were annotated manually by plotting some marker genes.
+We will not rerun the whole conos pipeline for this, we will load the objects now and show the marker genes used for annotation:
+
+These notebooks are not run for this preview again because it takes a long time to load the data, filter it and process.
+
+
+inhibitory neurons P60
+
+```{r}
+con60inh <- ci60$data.object
+palinh60 <- ci60$cell.groups.palette
+anno60inh <- ci60$cell.groups
+```
+
+
+```{r}
+library(ggplot2)
+con60inh$plotGraph(groups = anno60inh, font.size = 3) + scale_color_manual(values = palinh60) + theme_void() + theme(legend.position = "none")
+```
+```{r}
+library(dplyr)
+gs <- ci60$cell.groups %>% unique %>% as.character %>% strsplit(., split = "_") %>% unlist %>% unique
+
+pls <- lapply(gs, function(x) con60inh$plotGraph(gene = x, plot.na = F, size = 0.5) + 
+                theme_void() + ggtitle(x) + theme(legend.position = "none")
+)
+```
+
+```{r, fig.height=10, fig.width=10}
+cowplot::plot_grid(plotlist = pls)
+```
+
+```{r}
+
+```
+

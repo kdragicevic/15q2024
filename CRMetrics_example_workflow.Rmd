@@ -1,0 +1,252 @@
+---
+title: "QC"
+output: html_notebook
+---
+
+Author: Katarina Dragicevic (PhD student), Biotech Research and Innovation Centre, University of Copenhagen
+
+This is an example flowork for cleaning both P15 and P60 data.
+Both datasets were cleared for < 2000 UMI, < 0.05 mt genes and for doublets using scrublet. 
+Both datasets had ambient RNA removed using Cellbender using the output plots for empty and total droplets from cell ranger. 
+Some cells were additionally manually cleaned after running the pipeline multiple times because there were additional clusters which seemed to be doublets and low depth cells and which grouped together and messed up the plots.
+The full vignette for CRMetrics can be found here: https://github.com/khodosevichlab/CRMetrics 
+
+
+Loading packages:
+
+```{r}
+library(CRMetrics)
+library(magrittr)
+library(dplyr)
+```
+
+
+```{r}
+crm <- CRMetrics$new(data.path = "/maps/projects/thor/data/allcounts15q/P15counts",
+                     n.cores = 8, unique.names = F)
+```
+
+```{r}
+metrics.to.plot <- crm$selectMetrics(ids = c(1:4,6,18,19))
+crm$plotSummaryMetrics(metrics = metrics.to.plot,)
+```
+
+Some sample renaming
+
+```{r}
+currentnm <- c("P15_wt_AAM_k2"	,
+"P15_wt_AAM_k1"	,
+"P15_15q_AAM_k5",
+"P15_15q_AAM_k4",
+"P15_15q_AAM_k3",
+"P15_15q_AAM_k2",
+"P15_15q_AAM_k1",
+"AAM3_P15wt",
+"AAM12_15qb",
+"AAM12_wtb"	,
+"AAM12_15qa",
+"AAM12_wta",
+"AAM10_P15q15",
+"AAM10_P15wt"	,
+"AAM1_P15q15")
+
+newnm <- c("P15_AAMK2_wt_b2",
+"P15_AAMK1_wt_b2",
+	"P15_AAMK5_15q_b2",
+	"P15_AAMK4_15q_b2",
+	"P15_AAMK3_15q_b2",
+	"P15_AAMK2_15q_b2",
+	"P15_AAMK1_15q_b2",
+		"P15_AAM3_wt_b1",
+	"P15_AAM12b_15q_b1",
+"P15_AAM12b_wt_b1",
+	"P15_AAM12a_15q_b1",
+"P15_AAM12a_wt_b1",
+	"P15_AAM10_15q_b1",
+"P15_AAM10_wt_b1",
+"P15_AAM1_15q_b1")
+
+
+recodenm <- setNames(newnm, currentnm)
+#crm$metadata$sample <- recode(crm$metadata$sample, !!!recodenm)
+#crm$cms <- NULL
+crm$addDetailedMetrics(unique.names = F)
+cms <- crm$cms
+
+cms2 <- lapply(cms, function(x) {
+  cnm <- colnames(x) %>% strsplit(split = "!!", .) %>% sapply("[[", 2)
+  colnames(x) <- cnm
+  return(x)
+  }
+  )
+
+names(cms2) <- recode(names(cms2), !!!recodenm)
+
+cms3 <- lapply(names(cms2), function(x) {
+  cms0 <- cms2[[x]]
+  cnm <- paste0(x, "!!", colnames(cms0))
+  colnames(cms0) <- cnm
+  return(cms0)
+  }
+  ) %>% setNames(., names(cms2))
+
+
+
+crm$cms <- cms3
+crm$metadata$sample <- recode(crm$metadata$sample, !!!recodenm)
+```
+
+
+Metadata 
+
+```{r}
+cbind(Xist = crm$cms %>% lapply(function(x) x["Xist",] %>% sum),
+      Eif2s3y = crm$cms %>% lapply(function(x) x["Eif2s3y",] %>% sum))
+
+sex <- c("F", "F", "M", "M", "F", "M", "F", "M", "F", "M", "M", "M", "M", "F", "F")
+batch <- c(rep("Batch1", 8), rep("Batch2", 7))
+condition <- ifelse(grepl("15q", crm$cms %>% names), "15q", "wt")
+metadata <- data.frame(sample = crm$cms %>% names, sex, batch, condition)
+
+crm$metadata <- metadata
+```
+
+```{r}
+crm$summary.metrics$sample <- recode(crm$summary.metrics$sample, !!!recodenm)
+crm$detailed.metrics$sample <- recode(crm$detailed.metrics$sample, !!!recodenm)
+
+
+crm$plotSummaryMetrics(comp.group = "condition",
+                       metrics = metrics.to.plot, 
+                       plot.geom = "point", 
+                       stat.test = "non-parametric",
+                       second.comp.group = "sex")
+
+metrics.to.plot <- crm$detailed.metrics$metric %>%
+  unique()
+crm$plotDetailedMetrics(comp.group = "condition",
+                        metrics = metrics.to.plot, 
+                        plot.geom = "violin")
+
+
+```
+
+Run ambient RNA removal
+```{r, fig.height=10, fig.width=10}
+crm$prepareCellbender(shrinkage = 2, # Subsamples every 100th datapoint for faster plotting
+                      show.expected.cells = TRUE, 
+                      show.total.droplets = TRUE, n.cores = 10)
+
+ec <- crm$getExpectedCells()
+crm$expected.cells <- ec
+
+td <- crm$getTotalDroplets()
+crm$total.droplets <- td
+```
+
+```{r}
+crm$expected.cells[[1]]
+crm$total.droplets[[2]] <- 10000
+crm$total.droplets[[3]] <- 25000
+crm$total.droplets[[4]] <- 15000
+crm$total.droplets[["AAM12_wta"]] <- 10000
+crm$total.droplets[["AAM3_P15wt"]] <- 16000
+crm$total.droplets[["P15_15q_AAM_k1"]] <- 30000
+crm$total.droplets[["P15_15q_AAM_k2"]] <- 50000
+crm$total.droplets[["P15_15q_AAM_k3"]] <- 40000
+crm$total.droplets[["P15_15q_AAM_k4"]] <- 27000
+crm$total.droplets[["P15_15q_AAM_k5"]] <- 27000
+crm$total.droplets[["P15_wt_AAM_k1"]] <- 45000
+crm$expected.cells[["P15_15q_AAM_k1"]] <- 6000
+crm$expected.cells[["P15_15q_AAM_k2"]] <- 9000
+crm$expected.cells[["P15_15q_AAM_k3"]] <- 3500
+crm$expected.cells[["P15_15q_AAM_k4"]] <- 6000
+crm$expected.cells[["P15_15q_AAM_k5"]] <- 6500
+crm$expected.cells[["P15_wt_AAM_k1"]] <- 7000
+crm$expected.cells[["P15_wt_AAM_k2"]] <- 7000
+
+crm$prepareCellbender(shrinkage = 100, # Subsamples every 100th datapoint for faster plotting
+                      show.expected.cells = TRUE, 
+                      show.total.droplets = TRUE, n.cores = 10, expected.cells = crm$expected.cells, total.droplets = crm$total.droplets)
+```
+
+
+```{r}
+crm$saveCellbenderScript(file = "cellbender_scriptP15.sh", 
+                         fpr = 0.01, 
+                         epochs = 120, 
+                         use.gpu = TRUE,
+                         expected.cells = crm$expected.cells, total.droplets = crm$total.droplets)
+library(qs)
+qsave(crm, "crm_p15.qs")
+```
+
+
+```{r}
+crm <- qread("crm_p15.qs")
+crm$addDetailedMetrics(cellbender = T,n.cores = 100)
+crm$plotCbCellProbs()
+crm$plotCbTraining()
+crm$plotCbAmbExp(cutoff = 0.005)
+crm$plotCbAmbGenes(cutoff = 0.005)
+crm$plotCbCells()
+```
+
+
+
+Running pagoda2 + conos preview for depth cutoff
+
+```{r}
+crm$doPreprocessing(n.cores = 100)
+crm$createEmbedding(n.cores = 100)
+crm$plotEmbedding()
+crm$plotEmbedding(depth = TRUE, 
+             depth.cutoff = 1e3)
+```
+
+
+```{r}
+crm$plotEmbedding(mito.frac = TRUE, 
+             mito.cutoff = 0.05, 
+             species = "mouse")
+```
+
+```{r}
+crm$detectDoublets(env = "r-reticulate-dd",
+                   conda.path = "/opt/software/miniconda/4.12.0/condabin/conda",
+                   method = "scrublet")
+crm$plotEmbedding(doublet.scores = T, doublet.method = "scrublet")
+
+
+crm$plotFilteredCells(type = "embedding", 
+                      depth = TRUE, 
+                      depth.cutoff = 2000, 
+                      doublet.method = "scrublet", 
+                      mito.frac = TRUE, 
+                      mito.cutoff = 0.05, 
+                      species = "mouse")
+
+crm$plotFilteredCells(type = "tile", 
+                      doublet.method = "scrublet",
+                      depth = TRUE, 
+                      depth.cutoff = 2000,
+                      mito.frac = TRUE, 
+                      mito.cutoff = 0.05, 
+                      species = "mouse")
+
+crm$plotDepth(cutoff = 2000) 
+```
+
+
+```{r}
+crm$filterCms(depth.cutoff = 2000, 
+              mito.cutoff = 0.05, 
+              doublets = "scrublet",
+              samples.to.exclude = NULL,
+              species = "mouse")
+qsave(crm$cms.filtered, "cms_filtered_P15.qs", 
+      nthreads = 15)
+qsave(crm, "crm_P15.qs", 
+      nthreads = 15)
+```
+
