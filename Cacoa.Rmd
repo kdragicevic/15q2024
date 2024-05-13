@@ -1,0 +1,268 @@
+---
+title: "Cacoa analysis walkthrough"
+output: html_notebook
+---
+
+Author: Katarina Dragicevic (PhD student), Biotech Research and Innovation Centre, University of Copenhagen
+
+This notebook is about how the Cacoa pipeline was ran on different Conos objects (P15/P60 excitatory/inhibitory)
+The same pipeline was used for all objects and we show here on 1 example how it was done. 
+
+1. Load Conos object and annotation file. Construct the sample groups objects. Load color palettes.
+
+
+#we changed some of the annotation names after we ran Cacoa already on the objects. This is why we use this recvec to recode the names for the final plots to make them match those in the paper
+
+recvec <- (setNames(c('Sst_Crhr2', 'Sst_Crh', 'Sst_Nr2f2_Cdh9', 'Sst_Hpse', 'Sst_Nr2f2_Glra3', 'Pvalb_Kcnk10', 'Pvalb_Gpc6', 'Pvalb_Sema5a', 'Pvalb_Gpr149', 'Pvalb_Tacr1', 'Pvalb_Calb1', 'Sst_Necab1', 'Vip_Chat', 'Pvalb_Htr2c', 'Vip_Col15a1', 'Id2_Car10', 'Id2_Car2', 'Id2_Ano3', 'Sst_Calb2', 'Sst_Piezo2', 'Sst_Nr2f2_Necab1', 'Sst_Chodl', 'Pvalb_Vipr2', 'Lamp5_Lhx6', 'Vip_Thsd7b', 'Lamp5_Lsp1', 'Vip_Sgcz', 'Vip_Gpc3', 'Lamp5_Dock5', 'Pvalb_Gabrg1', 'Lamp5_Ndst4'), ci60$cell.groups %>% unique %>% as.character()))
+
+```{r}
+#we changed some of the annotation names after we ran Cacoa already on the objects. This is why we use this recvec to recode the names for the final plots to make them match those in the paper
+
+recvec <- (setNames(c('Sst_Crhr2', 'Sst_Crh', 'Sst_Nr2f2_Cdh9', 'Sst_Hpse', 'Sst_Nr2f2_Glra3', 'Pvalb_Kcnk10', 'Pvalb_Gpc6', 'Pvalb_Sema5a', 'Pvalb_Gpr149', 'Pvalb_Tacr1', 'Pvalb_Calb1', 'Sst_Necab1', 'Vip_Chat', 'Pvalb_Htr2c', 'Vip_Col15a1', 'Id2_Car10', 'Id2_Car2', 'Id2_Ano3', 'Sst_Calb2', 'Sst_Piezo2', 'Sst_Nr2f2_Necab1', 'Sst_Chodl', 'Pvalb_Vipr2', 'Lamp5_Lhx6', 'Vip_Thsd7b', 'Lamp5_Lsp1', 'Vip_Sgcz', 'Vip_Gpc3', 'Lamp5_Dock5', 'Pvalb_Gabrg1', 'Lamp5_Ndst4'), ci60$cell.groups %>% unique %>% as.character()))
+recvec
+```
+
+#library(cacoa)
+
+#library(qs)
+
+#con <- qread("inhibitory_p60.qs", nthreads = 5) #conos object
+
+#anno <- qread("anno_inhibitory_p60.qs", nthreads = 1) #annotation
+
+#sg.pal <- qread("sg.pal_inhibitory_p60.qs", nthreads = 1) #palette for sample groups
+
+#cg.pal <- qread("cg.pal_inhibitory_p60.qs", nthreads = 1) #palette for cell groups
+
+#sg <- qread("sg_inhibitory_p60.qs", nthreads = 1)  #sample groups
+
+
+
+```{r}
+library(cacoa)
+library(qs)
+
+#con <- qread("inhibitory_p60.qs", nthreads = 5) #conos object
+#anno <- qread("anno_inhibitory_p60.qs", nthreads = 1) #annotation
+#sg.pal <- qread("sg.pal_inhibitory_p60.qs", nthreads = 1) #palette for sample groups
+#cg.pal <- qread("cg.pal_inhibitory_p60.qs", nthreads = 1) #palette for cell groups
+#sg <- qread("sg_inhibitory_p60.qs", nthreads = 1)  #sample groups
+
+#how does sg look like?
+sg
+```
+
+```{r}
+#how does sg.pal look like?
+sg.pal
+```
+
+
+```{r}
+#how does cg.pal look like?
+cg.pal
+```
+
+
+```{r}
+cao <- Cacoa$new(data.object = con, 
+                 sample.groups = sg, 
+                 cell.groups = anno, 
+                 ref.level = "wt", target.level = "15q", 
+                 sample.groups.palette = sg.pal, 
+                 cell.groups.palette = cg.pal)
+```
+
+UMAP
+
+#cao$plotEmbedding(color.by = "cell.groups", font.size = 3)
+
+```{r}
+cao$plotEmbedding(color.by = "cell.groups", font.size = 3)
+```
+UMAP colored by sample
+
+#cao$plotEmbedding(color.by = "sample", font.size = 0)
+
+```{r}
+cao$plotEmbedding(color.by = "sample", font.size = 0)
+```
+Cell group proportions 
+
+#cao$plotCellGroupSizes()
+
+```{r}
+cao$plotCellGroupSizes()
+```
+
+
+Cell loadings
+
+#cao$estimateCellLoadings()
+
+```{r}
+#cao$estimateCellLoadings()
+p2 <- cao$plotCellLoadings(show.pvals = F)$data
+
+library(data.table)
+p2 <- data.table(p2)
+lvl <- p2[, abs(median(values)), by = ind][order(-V1),ind] %>% as.character()
+levels(p2$ind) <- rev(lvl)
+p2$ind <- factor(p2$ind, levels = rev(lvl))
+
+
+
+p2$ind <- factor(recode_factor(p2$ind,!!!recvec), levels = as.character(unique( recode_factor(p2$ind,!!!recvec))))
+palcomp <- setNames(ifelse(p2[, (median(values)), by = ind][order(-V1),V1] > 0, "dodgerblue2", "grey60"), p2[, (median(values)), by = ind][order(-V1),ind])
+palcomp2 <- setNames(ifelse(p2[, (median(values)), by = ind][order(-V1),V1] > 0, "darkblue", "grey50"), p2[, (median(values)), by = ind][order(-V1),ind])
+
+library(ggnewscale)
+p2 %>% ggplot( aes( x = values, y = ind, color = ind)) +
+  geom_violin(scale = "width", 
+                #fill = "#ededed", 
+                color = NA, aes(fill = ind), alpha = 0.2) +
+  theme_light() + theme(legend.position = "none") + scale_fill_manual(values = palcomp) +
+  geom_vline(xintercept = 0, linewidth = 0.1) +
+  new_scale_fill() + 
+  stat_summary(fun.data = iqr, geom = "errorbar", show.legend = F, 
+               aes(color = ind), 
+               stroke = 0.5, alpha = 0.9,color = "grey30", width = 0.25) + 
+  stat_summary(fun.data = iqr, geom = "point", show.legend = F,
+               aes(fill = ind), 
+               shape = 23, stroke = 0.5, color = "grey30", alpha = 0.9, size = 2.5) +  
+  scale_fill_manual(values = palcomp)
+```
+
+Cell Density
+
+#cao$estimateCellDensity(method = "graph")
+
+#cao$estimateDiffCellDensity(type = "wilcox", n.cores = 200)
+
+```{r}
+#cao$estimateCellDensity(method = "graph")
+#cao$estimateDiffCellDensity(type = "wilcox", n.cores = 200)
+cao$plotDiffCellDensity(type = "wilcox", min.z = 0, adjust.pvalues = T,  contours = c("Sst_Nr2f2_Glra3", "Pvalb_Vipr2"), contour.conf = "20%")
+```
+
+
+
+Expression shifts
+
+#cao$estimateExpressionShiftMagnitudes(top.n.genes = 300)
+
+```{r}
+#this is an example on only inhibitory neurons, in the paper we used both excitatory and inhibitory neurons for the plot at p60
+
+#cao$estimateExpressionShiftMagnitudes(top.n.genes = 300)
+pal2 <- cao$cell.groups.palette
+p3 <- cao$plotExpressionShiftMagnitudes(type = "box")$data
+
+p3$Type <- recode_factor(p3$Type,!!!recvec)
+p3 <- data.table(p3)
+p3[,med := median(value), by = Type]
+p3$Type <- factor(p3$Type, levels = p3[order(med)]$Type %>% unique %>% as.character())
+
+
+p3 %>% ggplot( aes( y = value, x = Type, color = Type)) +
+  geom_violin(scale = "width", 
+                #fill = "#ededed", 
+                color = NA, aes(fill = Type), alpha = 0.2, 
+              trim = F) +
+  theme_light() + theme(legend.position = "none", axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5), panel.grid.minor = element_blank(), panel.grid.major = element_blank()) + scale_color_manual(values = pal2)+ scale_fill_manual(values = pal2) +
+  geom_hline(yintercept = 0, linewidth = 0.1) +
+  stat_summary(fun.data = iqr, geom = "errorbar", show.legend = F, aes(color = Type), shape = 23, stroke = 0.5, alpha = 0.9,color = "grey30", width = 0.25) + 
+  stat_summary(fun.data = iqr, geom = "point", show.legend = F,aes(fill = Type), shape = 23, stroke = 0.5, color = "grey30", alpha = 0.9) 
+```
+Cluster free expression shifts
+
+#cao$estimateClusterFreeExpressionShifts(n.cores = 200, gene.selection = "z", normalize.both = T, n.top.genes = 300)
+
+```{r}
+#cao$estimateClusterFreeExpressionShifts(n.cores = 200, gene.selection = "z", normalize.both = T, n.top.genes = 300)
+p <- cao$plotClusterFreeExpressionShifts(min.z = 0.5, build.panel = F)
+ggplot(p[[1]]$data, aes(x = x, y = y, color = Color)) + geom_point() + scale_fill_manual()
+
+
+p1 <- p[[1]]$data %>%
+         arrange(Color)  %>% ggplot(aes(x = x, y = y, color = Color)) + geom_point(size = 0.1) + scale_color_gradient2(mid = "grey90", high = "firebrick", midpoint = 0.0077/2, low = "grey95", breaks = c(0,0.0077), name = "Z score") + theme_void() # + guides(color=guide_legend(title="Z score"))
+
+p2 <- p[[2]]$data%>%
+         arrange(Color) %>% ggplot(aes(x = x, y = y, color = Color)) + geom_point(size = 0.1) + scale_color_gradient2(mid = "grey90", high = "firebrick", midpoint = 0.6, low = "grey95", , name = "Adj.Z score") + theme_void() #+ guides(color=guide_legend(title="Adj.Z score"))
+
+library(patchwork)
+p1+p2
+```
+
+DEG analysis
+
+#cao$estimateDEPerCellType(n.cores = 100, name = "edgeR", n.cells.subsample = 5, resampling.method = "bootstrap", n.resamplings = 20)
+
+
+```{r}
+#cao$estimateDEPerCellType(n.cores = 100, name = "edgeR", n.cells.subsample = 5, resampling.method = "bootstrap", n.resamplings = 20)
+#cao$test.results$edgeR2 <- cao$test.results$edgeR %>% lapply(function(x){
+#  x$res <- na.omit(x$res[order(x$res$stab.median.rank),])
+#  x$res$Z <- {rank(x$res$stab.median.rank)%>% rev} * sign(x$res$log2FoldChange)
+#  return(x)
+#})
+
+names(cao$test.results$edgeR2) <- recode(cao$test.results$edgeR2 %>% names, !!!recvec)
+cao$plotNumberOfDEGenes(name = "edgeR2")
+```
+```{r}
+cao$test.results$edgeR2 %>% lapply("[[", "res") %>% rbindlist(., idcol = "celltype")
+```
+```{r}
+library(ggrepel)
+library(ggdist)
+datvol <- cao$test.results$edgeR2$Sst_Chodl$res %>% data.table
+
+p <- datvol %>% ggplot(., aes(x = log10(stab.median.rank), y = log2FoldChange, alpha = (abs(log2FoldChange)))) + 
+  geom_point(
+        aes(color= I(ifelse(abs(log2FoldChange) >1, "steelblue3", 'grey80')), size = (CellFrac))) + 
+  geom_hline(yintercept = -1, linetype = "dashed") + 
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  geom_label_repel(data = datvol[abs(log2FoldChange) > 1,] %>% head(20), 
+                   aes(label = Gene), 
+                   max.overlaps = 30, 
+                   size = 3, alpha = 1) + ylim(-4, 4)  + theme_tidybayes() + theme(legend.position = "top") + 
+  xlab("Stability - median rank of gene by p value across resamplings") + ylab("LFC") 
+
+ggrastr::rasterize(p, dpi = 300)
+```
+
+Gene ontology
+
+#cao$estimateOntology(type = "GSEA", name = "GSEA", org.db =org.Mm.eg.db, verbose = T, n.cores = 200, de.name = "edgeR2")
+
+```{r}
+#cao$estimateOntology(type = "GSEA", name = "GSEA", org.db =org.Mm.eg.db, verbose = T, n.cores = 200, de.name = "edgeR2")
+cao$plotOntologyHeatmap(name = "GSEA", genes = "all")
+```
+
+```{r}
+sstchodlall <- setNames(cao$test.results$GSEA$res$Sst_Chodl %>% lapply(function(x) x@result), c("BP", "CC", "MF")) %>% rbindlist(idcol = "subtype")
+sstchodlall$padj2 <- sstchodlall[order(pvalue),pvalue] %>% p.adjust(method = "BH")
+
+p <- ggrastr::rasterize(sstchodlall %>% ggplot(., aes(x = NES,  y = -log10(padj2), color = padj2, alpha = -log10(padj2), size = -log10(padj2))) + 
+  geom_point() + scale_size(range = c(0, 2)) + 
+  geom_label_repel(data = sstchodlall[padj2 < 0.05,], aes(label = Description), size = 2, alpha = 1, color = "black") + 
+  geom_hline(yintercept = 1.3, linetype = "dashed") + theme_tidybayes() + 
+   scale_color_gradient2(high = "lightsteelblue2", mid = "white", low = "steelblue4", midpoint = 0.5), 
+  dpi = 300)
+
+library(ggplot2)
+library(ggmagnify)
+library(ggplot2)
+library(ggforce)
+library(grid)
+
+p2 <- p +
+  facet_zoom(y = padj2 < 0.05, x = NES < -1.5, split = F, zoom.size = 2)
+
+p2
+```
+```{r}
+#qsave(cao, "cao_inh.qs")
+```
