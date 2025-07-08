@@ -1,0 +1,756 @@
+---
+title: "Patch seq make UMAP"
+output: html_notebook
+author: Katarina Dragicevic
+---
+
+```{r}
+library(GenomicAlignments)
+library(DESeq2)
+library(edgeR)
+library(TxDb.Mmusculus.UCSC.mm10.knownGene)
+library(GenomicAlignments)
+library(annotate)
+library(org.Mm.eg.db)
+library(conos)
+library(pagoda2)
+library(dplyr)
+```
+
+Run as bash script to generate bam files:
+
+```{}
+##!/bin/bash
+#
+#for i in $(ls /maps/projects/thor/people/qxc131/fastq_Bente_3/Aarhus_Smartseq2/ | grep trimmomatic)
+#do
+#sample=$(basename "${i}" _R1_001.trimmomatic_out.fastq.gz)
+#
+#STAR \
+#            --genomeDir "/maps/projects/thor/people/qxc131/fastq_Bente_2/genome" \
+#            --runMode alignReads \
+#            --readFilesCommand zcat \
+#            --outStd Log \
+#            --outFilterMultimapNmax 30 \
+#            --seedSearchStartLmax 25 \
+#            --runThreadN 20  \
+#            --readFilesIn "/maps/projects/thor/people/qxc131/fastq_Bente_3/Aarhus_Smartseq2/$i" \
+#            --outSAMtype BAM SortedByCoordinate \
+#            --twopassMode Basic \
+#            --sjdbOverhang 75 \
+#            --outFileNamePrefix "/maps/projects/thor/people/qxc131/fastq_Bente_2pass/bamfiles/${sample}_" \
+#
+#echo "Alignment completed for smpl: " "${sample}" \
+#done
+```
+
+
+With STAR:
+STAR version=2.7.10b
+
+
+```{r}
+fls <- list.files(path = "/maps/projects/thor/people/qxc131/fastq_Bente_2pass/bamfiles",
+    recursive=TRUE, pattern="*bam$", full=TRUE)
+
+myBams <- BamFileList(fls, yieldSize = 10000)
+```
+
+```{r}
+geneExons <- exonsBy(TxDb.Mmusculus.UCSC.mm10.knownGene, by = "gene")
+geneIntrons <- intronsByTranscript(TxDb.Mmusculus.UCSC.mm10.knownGene)
+
+geneCounts <- summarizeOverlaps(geneExons, myBams, ignore.strand = TRUE, mode = "IntersectionNotEmpty")
+geneCountsIntron <- summarizeOverlaps(geneIntrons, myBams, ignore.strand = TRUE, mode = "IntersectionNotEmpty")
+
+cols <- c("ENTREZID", "SYMBOL")
+ensids <- rownames(geneCounts)
+genes <- select(org.Mm.eg.db, keys=ensids, columns=cols, keytype="ENTREZID")
+
+cols <- c("ENTREZID", "SYMBOL")
+ensids_in <- rownames(geneCountsIntron)
+genesInt <- select(org.Mm.eg.db, keys=ensids_in, columns=cols, keytype="ENTREZID")
+```
+
+```{r}
+cnts <- geneCounts@assays@data$counts
+cnts <- cnts %>% as.sparse()
+cnts <- cnts[isNA(rownames(cnts)) == F,]
+nonzero_cnts <- cnts[rowSums(cnts)>0,]
+
+cnts_i <- geneCountsIntron@assays@data$counts
+cnts_i <- cnts_i %>% as.sparse()
+cnts_i <- cnts_i[isNA(rownames(cnts_i)) == F,]
+nonzero_cnts_I <- cnts_i[rowSums(cnts_i)>0,]
+```
+
+```{r}
+cnts_dt <- as.data.table(cnts, keep.rownames = T)
+cnts_i_dt <- as.data.table(cnts_i, keep.rownames = T)
+
+library(data.table)
+dts <- rbindlist(list(cnts_dt, 
+           cnts_i_dt), fill = TRUE)
+
+data.table::getDTthreads()
+dts <- dts[, lapply(.SD, function(x) dplyr::na_if(sum(x, na.rm = TRUE), 0)), rn]
+```
+
+
+```{r}
+merge_sparse_matrices <- function(A, B) {
+  
+  # Determine new row and column order
+  allRowNames <- unique(c(rownames(A), rownames(B)))
+  allColNames <- unique(c(colnames(A), colnames(B)))
+  
+  # Extract non-zero row indices and values from A
+  Ai <- A@i + 1
+  Ax <- A@x
+  Aj <- rep(1:ncol(A), diff(A@p))
+  
+  # Map non-zero indices of A to the combined row and column order
+  expandedAi <- match(rownames(A)[Ai], allRowNames)
+  expandedAj <- match(colnames(A)[Aj], allColNames)
+  
+  # Create expanded matrix for A
+  expandedA <- sparseMatrix(i=expandedAi, j=expandedAj, x=Ax, 
+                            dims=c(length(allRowNames), length(allColNames)))
+  
+  # Extract non-zero row indices and values from B
+  Bi <- B@i + 1
+  Bx <- B@x
+  Bj <- rep(1:ncol(B), diff(B@p))
+  
+  # Map non-zero indices of B to the combined row and column order
+  expandedBi <- match(rownames(B)[Bi], allRowNames)
+  expandedBj <- match(colnames(B)[Bj], allColNames)
+  
+  # Create expanded matrix for B
+  expandedB <- sparseMatrix(i=expandedBi, j=expandedBj, x=Bx, 
+                            dims=c(length(allRowNames), length(allColNames)))
+  
+  # Sum the matrices
+  merged <- expandedA + expandedB
+  
+  # Set the proper row and column names
+  rownames(merged) <- allRowNames
+  colnames(merged) <- allColNames
+  
+  return(merged)
+}
+
+mergedMatrix <- merge_sparse_matrices(cnts, cnts_i)
+union(rownames(cnts), rownames(cnts_i)) %>% length; dim(mergedMatrix) #it checks out, nice. 
+```
+
+```{r}
+patch_seq_record <- read_delim("/maps/projects/thor/people/qxc131/R/Final_15q/patch-seq record.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+
+cells <- colnames(mergedMatrix) %>% strsplit("_S") %>% sapply("[[", 1)
+colnames(mergedMatrix) <- cells
+patch <- patch_seq_record[patch_seq_record$number %in% cells,]
+colnames(patch)[3] <- "cond"
+patch1 <- patch[patch$`number of cell` < 10,]
+
+nonz_mergedMatrix <- mergedMatrix[rowSums(mergedMatrix)>0,]
+nonz_mergedMatrix <- nonz_mergedMatrix[,colSums(mergedMatrix)>0]
+
+patch15q <- nonz_mergedMatrix[, patch1[patch1$cond == "tg",]$number]
+patchwt <- nonz_mergedMatrix[, patch1[patch1$cond == "wt",]$number]
+
+patches <- list(patch_15q = patch15q, patch_wt = patchwt)
+qs::qsave(patches, "patch_mats3.qs")
+```
+
+
+#create conos
+
+```{r}
+tasic_exon <- read_csv("/maps/projects/thor/people/qxc131/Yaoetal2021/MOp_MiniAtlas_2020_bdbag_2021_04_28/data/Analysis_SMARTer_nuclei_MOp/data/GSE115746_cells_exon_counts.csv")
+tasic_exon <- column_to_rownames(tasic_exon, var = "...1")
+tasic_exon <- as.sparse(tasic_exon)
+
+
+GSE115746_complete_metadata_28706_cells <- read_csv("/maps/projects/thor/people/qxc131/Yaoetal2021/MOp_MiniAtlas_2020_bdbag_2021_04_28/data/Analysis_SMARTer_nuclei_MOp/data/GSE115746_complete_metadata_28706-cells.csv")
+#take only sst neurons
+tasicmeta <- GSE115746_complete_metadata_28706_cells[GSE115746_complete_metadata_28706_cells$cell_subclass == "Sst",] %>% na.omit
+
+tasic_exon_sst <- tasic_exon[, colnames(tasic_exon)  %in% tasicmeta$sample_name]
+
+#take only deeplayer sst neurons
+deeplcells <- tasicmeta[tasicmeta$dissected_layer %in% c("L4", "L5", "L6","L5-L6", "L1-L6", "L6b"),]$sample_name
+deep_tasic_exon_sst <- tasic_exon_sst[, colnames(tasic_exon_sst) %in% deeplcells]
+
+allmatsvisp <- list(q15 = nonzero_cnts[nonzero_cnts %>% rownames() %>% na.omit,][,patch[patch$`number of cell` == 1,]$number], #take only patchseq records where we know we patched 1 cell only 
+                    yao_M = NULL, 
+                    yao = NULL)
+
+allmatsvisp$yao <- deep_tasic_exon_sst[,colnames(deep_tasic_exon_sst) %in% tasicmeta[tasicmeta$source_name == "Primary Visual Cortex (VISp)",]$sample_name]
+allmatsvisp$yao_M <- deep_tasic_exon_sst[,colnames(deep_tasic_exon_sst) %in% tasicmeta[tasicmeta$source_name != "Primary Visual Cortex (VISp)",]$sample_name]
+```
+
+```{r}
+con <- quickConos(n.iterations = 10, cms = unname(allmatsvisp),
+          names(allmatsvisp),
+           n.cores.p2=50,
+           n.cores.con=200, get.tsne = F, get.largevis = F, space = "CCA", k.conos = 20, k.self = 30, min.dist = 1, spread = 20)
+
+con<- con$con
+con$plotGraph(color.by = "sample")
+con$embedGraph(method = "UMAP", min.dist = 1, spread = 20, gamma = 5)
+con$plotGraph(groups = anno)
+
+
+#get reference annotation for label transfer
+tasiclabel_df <- readRDS("tasiclabel_df.RDS")
+rec <- setNames(tasiclabel_df$mylabel, tasiclabel_df$tasiclabel)
+anno <- setNames(recode(data.frame(tasicmeta, row.names = tasicmeta$sample_name)[colnames(deep_tasic_exon_sst),"cell_cluster"], !!!rec), 
+         data.frame(tasicmeta, row.names = tasicmeta$sample_name)[colnames(deep_tasic_exon_sst),"sample_name"])
+
+#transfer labels from Tasic to our patchseq data
+labels_3 <- con$propagateLabels(labels = anno, method = "diffusion")
+
+con$plotGraph(groups = labels_3$labels)
+```
+
+
+
+Helper functions:
+(taken from: "http://pklab.med.harvard.edu/rasmus/scRNA_helper.R")
+```{r}
+#Rename column names, making them unique
+renameCols <- function(cms, names) {
+  if(!length(cms)==length(names)) stop("Names must match number of count matrices.")
+  
+  mapply(function(c, n) {
+    colnames(c) <- lapply(colnames(c), function(cn) paste0(n,cn)) %>% unlist
+    return(c)
+  }, c=cms, n=names, SIMPLIFY = F)
+}
+
+#Rename column/cell names in velocyto objects
+renameVeloCells <- function(cms.list, pattern, replacement) {
+  cnames.corr <- lapply(cms.list, colnames) %>% lapply(function(c) gsub(pattern, replacement, c))
+  cms.list %<>% mapply(function(corr,cms) {
+    colnames(cms) <- corr
+    return(cms)
+  }, corr = cnames.corr,
+  cms = .)
+  return(cms.list)
+}
+
+#Prepare velocyto data with Conos object
+veloOnConos <- function(list.velo, filter.limit, con=con, clustering=NULL, groups=NULL, n.odgenes=2e3, verbose=TRUE, min.max.cluster.average.emat=0.5, min.max.cluster.average.nmat=0.05, min.max.cluster.average.smat=0.01, ncomps=100) {
+  if(verbose) cat("Filter Velocyto object ")
+  genes <- sapply(con$samples, conos:::getGenes) %>% unlist %>% unique
+  cells <- sapply(con$samples, conos:::getCellNames) %>% unlist %>% unique
+  
+  list.velo %<>% lapply(conos:::prepareVelocity, genes=genes, cells=cells)
+  if(verbose) cat(".")
+  
+  emat <- do.call(cbind, lapply(list.velo, function(x) {x[[1]]}))
+  emat %<>% .[,colSums(.)>=filter.limit]
+  rownames(emat) <- make.unique(rownames(emat))
+  if(verbose) cat(".")
+  
+  nmat <- do.call(cbind, lapply(list.velo, function(x) {x[[2]]}))
+  nmat %<>% .[,colnames(.) %in% colnames(emat)]
+  rownames(nmat) <- rownames(emat)
+  if(verbose) cat(".")
+  
+  smat <- do.call(cbind, lapply(list.velo, function(x) {x[[3]]}))
+  smat %<>% .[,colnames(.) %in% colnames(emat)]
+  rownames(smat) <- rownames(emat)
+  if(verbose) cat(".")
+  
+  groups <- conos:::parseCellGroups(con, clustering, groups) %>% .[names(.) %in% colnames(emat)]
+  if(any(table(groups)<2)) warning(" groups with less than 2 cells detected in 'groups'/'clustering', these are excluded ...")
+  groups %<>% .[. %in% names(table(.)[table(.)>1])]
+  
+  emat %<>% .[,colnames(.) %in% names(groups)] %>% velocyto.R::filter.genes.by.cluster.expression(groups, min.max.cluster.average=min.max.cluster.average.emat)
+  nmat %<>% .[,colnames(.) %in% names(groups)] %>% velocyto.R::filter.genes.by.cluster.expression(groups, min.max.cluster.average=min.max.cluster.average.nmat)
+  smat %<>% .[,colnames(.) %in% names(groups)] %>% velocyto.R::filter.genes.by.cluster.expression(groups, min.max.cluster.average=min.max.cluster.average.smat)
+  if(verbose) cat(" done!\n")
+  
+  cell.colors <- pagoda2:::fac2col(groups)
+  emb <- con$embedding %>% .[rownames(.) %in% colnames(emat),]
+  
+  emat <- emat[,order(match(colnames(emat), rownames(emb)))]
+  nmat <- nmat[,order(match(colnames(nmat), rownames(emb)))]
+  smat <- smat[,order(match(colnames(smat), rownames(emb)))]
+  
+  pcs <- conos:::pcaFromConos(con$samples, n.odgenes=n.odgenes, ncomps = ncomps) %>% .[rownames(.) %in% colnames(emat),]
+  pcs <- pcs[order(match(rownames(pcs), rownames(emb))),]
+  
+  if (verbose) cat("Calculating cell distances...\n")
+  cell.dist <- as.dist(1 - velocyto.R::armaCor(t(pcs)))
+  
+  if (verbose) cat("All Done!")
+  return(list(cell.dist=cell.dist, emat=emat, nmat=nmat, smat=smat, cell.colors=cell.colors, emb=emb))
+}
+
+#Mitochondrial fraction
+mitoFraction <- function(con, species="human") {
+  if(species=="human") lapply(con$samples, function(d) Matrix::rowSums(d$counts[,grep("MT-", colnames(d$counts))]) / Matrix::rowSums(d$counts)) %>% Reduce(c, .)
+  else if(species=="mouse") lapply(con$samples, function(d) Matrix::rowSums(d$counts[,grep("mt-", colnames(d$counts))]) / Matrix::rowSums(d$counts)) %>% Reduce(c, .)
+  else stop("Species must either be 'human' or 'mouse'.")
+}
+
+#Shannon entropy
+ShannonEntropy <- function(con, levels=20, verbose=T) {
+  shannon.entropy <- function(p)  
+    {if (min(p) < 0 || sum(p) <= 0)
+      return(NA)
+    p.norm <- p[p>0]/sum(p)
+    -sum(log2(p.norm)*p.norm)
+  }
+  
+  #Calculate
+  if(verbose) message("Merging matrices...")
+  rc <- conos:::mergeCountMatrices(lapply(con$samples, conos:::getRawCountMatrix))
+  
+  if(verbose) {
+    message("Calculating entropy...")
+    entropy <- unlist(pbmcapply::pbmclapply(1:dim(rc)[2], function(x) shannon.entropy(rc[,x]), mc.cores=con$n.cores))
+    } else {
+      entropy <- unlist(parallel::mclapply(1:dim(rc)[2], function(x) shannon.entropy(rc[,x]), mc.cores=con$n.cores))
+    }
+  
+  
+  if(verbose) message("Normalizing based on levels...")
+  names(entropy) <- colnames(rc)
+  
+  min <- min(entropy)
+  entropynorm <- floor((entropy - min)/(max(entropy) - min) * levels)
+  return(entropynorm)
+}
+
+#Proportions of Conos object
+conProp <- function(con, clusters, ctrl, disease) {
+  dpc <- con$getDatasetPerCell()
+  cond <- as.factor(setNames(ifelse(grepl(ctrl,dpc),ctrl,disease), names(dpc)))
+  
+  samplenames <- unique(dpc)
+  
+  c <- clusters[names(clusters) %in% names(dpc[cond==ctrl])]
+  c_samples <- lapply(samplenames[grep(ctrl,samplenames)], function(s) {
+    sprop <- c[grep(s,names(c))]
+    sprop <- table(sprop)/length(sprop)
+  })
+  names(c_samples) <- samplenames[grep(ctrl,samplenames)]
+  c <- table(c)/length(c)
+  
+  d <- clusters[names(clusters) %in% names(dpc[cond==disease])]
+  d_samples <- lapply(samplenames[grep(disease,samplenames)], function(s) {
+    sprop <- d[grep(s,names(d))]
+    sprop <- table(sprop)/length(sprop)
+  })
+  names(d_samples) <- samplenames[grep(disease,samplenames)]
+  d <- table(d)/length(d)
+  
+  res <- c(list(c),c_samples,list(d),d_samples) %>% setNames(c(ctrl,lapply(samplenames[grep(ctrl,samplenames)], function(n) paste0(ctrl,"_",n)) %>% unlist,disease,lapply(samplenames[grep(disease,samplenames)], function(n) paste0(disease,"_",n))))
+  res <- do.call("rbind", res)
+  
+  return(res)
+}
+
+addEmbeddingP2Web <- function(p2, con, embedding=NULL, name="UMAP") {
+  if(is.null(embedding)) embedding <- con$embedding
+  
+  if(identical(dim(p2$originalP2object$embeddings$PCA[[1]]),dim(embedding))) {
+    p2$originalP2object$embeddings$PCA[[name]] <- embedding
+    return(p2)
+  } else {
+    stop("The embedding dimensions of the p2.web object and the input object are not identical.")
+  }
+}
+
+embedUMAP <- function(con,
+                      min.dist=0.01,
+                      spread=15,
+                      min.prob.lower=1e-7,
+                      method=leiden.community,
+                      resolution=1,
+                      min.group.size=25,
+		      n.iterations = 1) {
+  message("Creating UMAP embedding...")
+  con$embedGraph(method="UMAP", 
+                 min.dist=min.dist, 
+                 spread=spread,
+                 min.prob.lower=min.prob.lower)
+  
+  message("Estimating clusters...")
+  con$findCommunities(method=leiden.community, resolution=resolution, min.group.size=min.group.size, n.iterations=n.iterations)
+  
+  return(con)
+}
+
+buildConosGraph <- function(con,
+                          k.conos=15, 
+                          k.self=15, 
+                          space='PCA', 
+                          ncomps=40,
+                          n.odgenes=2e3,
+                          matching.method='mNN', 
+                          metric='angular', 
+                          score.component.variance=T,
+                          alignment.strength=0,
+                          min.dist=0.01, 
+                          spread=15,
+                          min.prob.lower=1e-3,
+                          resolution=1,
+                          min.group.size=25,
+			  n.iterations = 1) {
+  message("Building graph...")
+  con$buildGraph(k=k.conos, 
+                 k.self=k.self, 
+                 space=space, 
+                 ncomps=ncomps, 
+                 n.odgenes=n.odgenes, 
+                 matching.method=matching.method, 
+                 metric=metric, 
+                 verbose=T, 
+                 score.component.variance=score.component.variance,
+                 alignment.strength=alignment.strength)
+  
+  embedUMAP(con=con,
+            min.dist=min.dist,
+            spread=spread,
+            min.prob.lower=min.prob.lower,
+            method=leiden.community,
+            resolution=resolution,
+            min.group.size=min.group.size,
+	    n.iterations=n.iterations)
+  
+  return(con)
+}
+
+quickConos <- function(cms, 
+                       sample.names,
+                       n.cores.p2,
+                       n.cores.con,
+                       n.odgenes=3e3, 
+                       nPcs = 50, 
+                       k.p2 = 30, 
+                       perplexity = 50, 
+                       log.scale = TRUE, 
+                       trim = 10, 
+                       keep.genes = NULL, 
+                       min.cells.per.gene = 3, 
+                       min.transcripts.per.cell = 200, 
+                       get.largevis = F, 
+                       get.tsne = F, 
+                       make.geneknn = F,
+                       k.conos=15, 
+                       k.self=30, 
+                       space='PCA', 
+                       ncomps=40, 
+                       matching.method='mNN', 
+                       metric='angular', 
+                       score.component.variance=T,
+                       alignment.strength=0,
+                       min.dist=0.01, 
+                       spread=15,
+		       n.iterations = 1) {
+  if(length(cms)==length(sample.names)) {
+    if(any(is.na(sample.names))) stop("Names contains NAs")
+
+    message("Performing P2 processing...")
+    panel.preprocessed <- lapply(cms, function(x) basicP2proc(x, n.cores = n.cores.p2,
+                                                              n.odgenes = n.odgenes, 
+                                                              nPcs = nPcs,
+                                                              k = k.p2, 
+                                                              perplexity = perplexity, 
+                                                              log.scale = log.scale, 
+                                                              trim = trim, 
+                                                              keep.genes = keep.genes, 
+                                                              min.cells.per.gene = min.cells.per.gene, 
+                                                              min.transcripts.per.cell = min.transcripts.per.cell, 
+                                                              get.largevis = get.largevis, 
+                                                              get.tsne = get.tsne, 
+                                                              make.geneknn = make.geneknn))
+    
+    names(panel.preprocessed) = sample.names
+    con <- Conos$new(panel.preprocessed, n.cores=n.cores.con)
+    
+    con <- buildConosGraph(con=con,
+                           k.conos=k.conos, 
+                           k.self=k.self, 
+                           space=space, 
+                           ncomps=ncomps, 
+                           n.odgenes=n.odgenes, 
+                           matching.method=matching.method, 
+                           metric=metric, 
+                           score.component.variance=score.component.variance,
+                           alignment.strength=alignment.strength,
+                           min.dist=min.dist, 
+                           spread=spread,
+			   n.iterations=n.iterations)
+    
+    return(list(con=con, panel.preprocessed=panel.preprocessed))
+  } else {
+    stop("Sample names must match number of count matrices.")
+  }
+  
+}
+
+collapseAnnotation <- function(anno, label) {
+  anno %<>% factor
+  idx <- grepl(label,levels(anno))
+  cat(paste0("Collapsing ",sum(idx)," labels containing '",label,"' in their name into one label.\n"))
+  levels(anno)[idx] <- c(label)
+  anno %<>% factor
+  return(anno)
+}
+
+getConosDepth <- function(con) {
+  lapply(con$samples, function(d) d$depth) %>% unlist %>% setNames(.,(strsplit(names(.), ".", T) %>% 
+                                                                                 sapply(function(d) d[2])))
+}
+
+getConosCluster <- function(con, name="leiden") {
+  con$clusters[[name]]$groups
+}
+
+plotDotMap <- function (markers, 
+                        count.matrix, 
+                        annotation, 
+                        marker.colour="black",
+                        cluster.colour="black",
+                        text.angle = 45, 
+                        gene.order = NULL, 
+                        cols = c("blue", "red"),
+                        col.min = -2.5,
+                        col.max = 2.5,
+                        dot.min = 0,
+                        dot.scale = 6,
+                        scale.by = "radius",
+                        scale.min = NA,
+                        scale.max = NA,
+                        verbose=T) {
+  scale.func <- switch(scale.by, 'size' = scale_size, 'radius' = scale_radius, stop("'scale.by' must be either 'size' or 'radius'"))
+  if(verbose) cat("Plotting .")
+  
+  if(!is.character(markers)) stop("'markers' must be a character vector.")
+  
+  missing.markers <- setdiff(markers, colnames(count.matrix))
+  if(length(missing.markers)>0) {
+  cat("Not all markers are in 'count.matrix'. The following are missing:\n",paste(missing.markers, collapse=" "),"\n")
+    stop("Please update 'markers'.")
+  }
+  
+  # From CellAnnotatoR:::plotExpressionViolinMap, should be exchanged with generic function
+  p.df <- lapply(markers, function(g) data.frame(Expr = count.matrix[names(annotation), g], Type = annotation, Gene = g)) %>% Reduce(rbind, .)
+  if (is.logical(gene.order) && gene.order) {
+    gene.order <- unique(markers)
+  } else {
+    gene.order <- NULL
+  }
+  
+  if (!is.null(gene.order)) {
+    p.df %<>% dplyr::mutate(Gene = factor(as.character(Gene), 
+                                          levels = gene.order))
+  }
+  
+  # Adapted from Seurat:::DotPlot
+  if(verbose) cat(".")
+  data.plot <- levels(annotation) %>% lapply(function(t) {
+    markers %>% lapply(function(g) {
+      df <- p.df %>% filter(Type==t, Gene==g)
+      pct.exp <- sum(df$Expr>0)/dim(df)[1]*100
+      avg.exp <- mean(df$Expr[df$Expr>0])
+      res <- data.frame(gene=g,
+                        pct.exp=pct.exp,
+                        avg.exp=avg.exp)
+      return(res)
+    }) %>% Reduce(rbind, .)
+  }) %>% 
+    setNames(levels(annotation)) %>%
+    bind_rows(., .id="cluster")
+  
+  data.plot$cluster %<>% factor(., levels=rev(unique(.)))
+  
+  data.plot %<>% arrange(gene)
+  
+  data.plot$avg.exp.scaled <- data.plot$gene %>% unique %>% sapply(function(g) {
+    data.plot %>% .[.$gene == g, 'avg.exp'] %>% 
+      scale %>% 
+      MinMax(min = col.min, max = col.max)
+  }) %>% unlist %>% as.numeric
+  
+  data.plot$pct.exp[data.plot$pct.exp < dot.min] <- NA
+  
+  cluster.colour %<>% rev
+  
+  plot <- ggplot(data.plot, aes_string("gene", "cluster")) +
+    geom_point(aes_string(size = "pct.exp", color = "avg.exp.scaled")) +
+    scale.func(range = c(0, dot.scale), limits = c(scale.min, scale.max)) +
+    theme(axis.text.x = element_text(angle=text.angle, hjust = 1, colour=marker.colour),
+          axis.text.y = element_text(colour=cluster.colour),
+          panel.background = element_rect(fill = "white", colour = "black", size = 1, linetype = "solid"),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank()) +
+    guides(size = guide_legend(title = 'Percent expressed'), color = guide_colorbar(title = 'Average expression')) +
+    labs(x = 'Marker', y = 'Cluster') +
+    scale_color_gradient(low = cols[1], high = cols[2])
+  if(verbose) cat(" done!")
+  return(plot)
+}
+
+clusterPlots <- function(genes, cluster, annotation, limits) {
+  plot1 <- list(con$plotGraph(groups=annotation, subgroups=cluster, plot.na=F, size=0.1, alpha=0.3, shuffle.colors=F) + limits) %>%
+    append(list(con$plotGraph(groups=ifelse(grepl(cluster,annotation),cluster,"Other") %>% setNames(names(annotation)), plot.na=F, size=0.01, alpha=0.1, shuffle.colors=F) + limits)) %>%
+    append(list(con$plotGraph(groups=group.per.cell[names(group.per.cell) %in% names(annotation[annotation==cluster])], plot.na=F, size=0.01, alpha=0.1, shuffle.colors=F) + limits)) %>%
+    cowplot::plot_grid(plotlist=., ncol=2)
+  
+  if(length(genes)>0) {
+    plot2 <- genes %>%
+      lapply(function(g) con$plotGraph(groups=annotation, gene=g, alpha=0.1, size=0.1, title=g, plot.na=F) + limits) %>%
+      cowplot::plot_grid(plotlist=., ncol=2)
+    
+    plot3 <- genes %>% lapply(function(g) {
+      con$plotGraph(groups=annotation, subgroups=cluster, gene=g, plot.na=F, size=1, alpha=0.3, shuffle.colors=T, title=g) + limits
+    }) %>%
+      cowplot::plot_grid(plotlist=., ncol=2)
+    
+    plot4 <- sccore:::dotPlot(genes, cluster.cms, cluster.per.cell, n.cores=1)
+    
+    plot5 <- sccore:::dotPlot(genes, cluster.cms, annotation, n.cores=1)
+    
+    plot6 <- sccore:::dotPlot(genes, cluster.cms, group.per.cell[names(group.per.cell) %in% names(annotation[annotation==cluster])], n.cores=1)
+  }
+  
+  df <- table(sample.per.cell[names(sample.per.cell) %in% names(annotation[annotation==cluster])]) %>%
+    data.frame %>% 
+    setNames(c("sample","percent"))
+  df$percent <- df$percent/table(sample.per.cell[names(sample.per.cell) %in% names(annotation)]) %>% as.numeric*100
+  df$group <- c(rep("CTRL",10),
+                rep("MSA",9),
+                rep("PD",13))
+  
+  plot7 <- ggplot(df, aes(sample, percent, fill=group)) + geom_col() + theme(legend.position="none") + xlab("")+ ylab("% cells of cell type per sample") + theme(axis.text.x = element_text(angle=90))
+  
+  plot8 <- ggplot(df, aes(group, percent, fill=group)) + geom_boxplot() + theme(legend.position="none") + xlab("")+ ylab("% cells of cell type per sample") + theme(axis.text.x = element_text(angle=90))
+  
+  if(length(genes)>0) return(list(plot1,plot2,plot3,plot4,plot5,plot6,plot7,plot8)) else return(list(plot1,plot7,plot8))
+}
+
+typePlots <- function(markers, annotation, limits) {
+  plot1 <- con$plotGraph(groups=annotation, plot.na=F, size=0.5, alpha=0.1, shuffle.colors=T, mark.groups=F, show.legend=T, legend.position="bottom") + limits
+  plot2 <- con$plotGraph(groups=annotation, plot.na=F, size=0.5, alpha=0.1, shuffle.colors=T) + limits
+  
+  plot3 <- cowplot::plot_grid(plotlist=lapply(c("CTRL","PD","MSA"), function(p) {
+    con$plotGraph(groups=group.per.cell[names(group.per.cell) %in% names(annotation)], subgroups=p, plot.na=F, size=0.1, alpha=0.3, shuffle.colors=T, title=p) + limits
+  }), ncol=2)
+  
+  
+  plot4 <- markers %>%
+    lapply(function(g) gg <- con$plotGraph(groups=group.per.cell[names(group.per.cell) %in% names(annotation)], gene=g, alpha=0.1, size=0.1, title=g, plot.na=F) + limits) %>%
+    cowplot::plot_grid(plotlist=., ncol=2)
+  
+  plot5 <- markers %>%
+    sccore:::dotPlot(cluster.cms, annotation, n.cores=1)
+  
+  df <- table(sample.per.cell[names(group.per.cell)%in% names(annotation)]) %>%
+    data.frame %>%
+    setNames(c("sample","percent"))
+  df$percent <- df$percent/table(sample.per.cell) %>% as.numeric*100
+  df$group <- c(rep("CTRL",10),
+                rep("MSA",9),
+                rep("PD",13))
+  
+  plot6 <- ggplot(df, aes(sample, percent, fill=group)) + geom_col() + theme(legend.position="none") + xlab("")+ ylab("% cells per sample") + theme(axis.text.x = element_text(angle=90))
+  
+  plot7 <- ggplot(df, aes(group, percent, fill=group)) + geom_boxplot() + theme(legend.position="none") + xlab("")+ ylab("% cells per sample")
+  
+  return(list(plot1,plot2,plot3,plot4,plot5,plot6,plot7))
+}
+
+sortCPDB <- function(path) {
+  pval_path <- paste0(path,"pvalues.txt")
+  sigmean_path <- paste0(path,"significant_means.txt")
+  message(paste0("Looking for the following files:\n",pval_path,"\n",sigmean_path))
+  pval_full <- read.table(pval_path, sep="\t", header=T)
+  sigmean_full <- read.table(sigmean_path, sep="\t", header=T)
+  
+  #Remove blood and leukocytes
+  idx_blood <- colnames(pval_full)[grep("Blood",colnames(pval_full))]
+  idx_leukocytes <-colnames(pval_full)[grep("Leukocytes",colnames(pval_full))] 
+  
+  pval_full <- pval_full[,!colnames(pval_full) %in% idx_blood]
+  pval_full <- pval_full[,!colnames(pval_full) %in% idx_leukocytes]
+  pval <- pval_full[,12:36]
+  rownames(pval) <- pval_full$id_cp_interaction
+  pval[pval>0.1] <- 1
+  
+  sigmean_full <- sigmean_full[,!colnames(sigmean_full) %in% idx_blood]
+  sigmean_full <- sigmean_full[,!colnames(sigmean_full) %in% idx_leukocytes]
+  sigmean <- sigmean_full[,13:37]
+  rownames(sigmean) <- sigmean_full$id_cp_interaction
+  
+  #Check consistency between data
+  message(paste0(length(setdiff(rownames(pval),rownames(sigmean)))," pairs mismatching between matrices."))
+  
+  #Interaction cell types W/O any significant interactions
+  cs_pval <- pval %>% colSums
+  idx_cs <- cs_pval[cs_pval==dim(pval_full)[1]] %>% names
+  
+  pval_full <- pval_full[,!colnames(pval_full) %in% idx_cs]
+  sigmean <- sigmean[,!colnames(sigmean) %in% idx_cs]
+  sigmean_full <- sigmean_full[,!colnames(sigmean_full) %in% idx_cs]
+  
+  #Interaction pairs W/O any significant interactions
+  rs_pval <- rowSums(pval)
+  idx_rs <- names(rs_pval[rs_pval==25])
+  
+  pval_full <- pval_full[!pval_full$id_cp_interaction %in% idx_rs,]
+  sigmean <- sigmean[!rownames(sigmean) %in% idx_rs,]
+  sigmean_full <- sigmean_full[!sigmean_full$id_cp_interaction %in% idx_rs,]
+  
+  message(paste0(sum(colSums(sigmean, na.rm=T)==0)," interactions should be removed columnwise."))
+  message(paste0(sum(rowSums(sigmean, na.rm=T)==0)," interactions should be removed rowwise."))
+  
+  #Save cleaned tables
+  message(paste0("Saving tables with ",dim(sigmean)[1]," interaction pairs."))
+  write.table(pval_full, paste0(path,"pvalues_clean.txt"), sep="\t", col.names=T, row.names=F)
+  sigmean_full[is.na(sigmean_full)] <- ""
+  write.table(sigmean_full, paste0(path,"significant_means_clean.txt"), sep="\t", col.names=T, row.names=F)
+  message("All done!")
+}
+
+renameAnnotation <- function(annotation, old, new) {
+  if(!is.factor(annotation)) stop("Annotation must be a factor.")
+  
+  levels(annotation)[levels(annotation) %in% old] <- new
+  
+  return(annotation)
+}
+
+dotSize <- function(size, alpha=1) {
+  ggplot2::guides(colour = guide_legend(override.aes = list(size=size,
+                                                            alpha=alpha)))
+}
+
+checkDims <- function(cm, con) {
+  cat("Dimensions of cm : ",paste((dim(cm)), collapse=" "),"\n")
+  cat("Dimensions of con: ",paste((dim(con$embedding)), collapse=" "),"\n")
+  
+  if(dim(cm)[2]!=dim(con$embedding)[1])
+    stop("Dimensions don't match.")
+  
+  message("All OK!")
+}
+
+grepl.replace <- function(x, patterns, result = NULL) {
+  if(is.null(result)) result <- patterns
+  if(length(patterns) != length(result)) stop("'patterns' and 'result' must have equal lengths.")
+  
+  for(i in 1:length(patterns)) {
+    x[grepl(patterns[i], x)] <- result[i]
+  }
+  return(x)
+}
+```
+
