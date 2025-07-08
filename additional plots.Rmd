@@ -1,0 +1,243 @@
+---
+title: "Additional plots: MDS, overlap P15/P60, human snRNA-seq overlap"
+output: html_notebook
+author: Katarina Dragicevic
+---
+
+#New MDS plot 
+
+```{r}
+caoallp60$plotSampleDistances(method = "MDS")
+dt <- caoallp60$plotSampleDistances(method = "MDS")$data 
+
+dt$chemistry <- meta60$chemistry
+dt$sex <- meta60$sex
+
+
+
+p2 <- ggplot(dt, aes(x = x, y = y, color = chemistry, shape = condition)) + geom_point(size = 5) + 
+  theme_light() + theme(panel.grid = element_blank()) + 
+  scale_color_manual(values = c("orchid4", "violetred3", "orchid3")) + 
+  scale_shape_manual(values = c(17, 19))
+
+p3 <- ggplot(dt, aes(x = x, y = y, color = sex, shape = condition)) + geom_point(size = 5) + 
+  theme_light() + theme(panel.grid = element_blank()) + 
+  scale_color_manual(values = c("palevioletred1", "skyblue3"))+ 
+  scale_shape_manual(values = c(17, 19))
+```
+
+```{r}
+caoallp15$plotSampleDistances(method = "MDS")
+dt <- caoallp15$plotSampleDistances(method = "MDS")$data 
+
+
+dt$chemistry <- meta15$chemistry
+dt$sex <- meta15$sex
+
+
+#meta15 <- data.frame(caoallp15$test.results$metadata.separation$metadata)
+
+
+p5 <- ggplot(dt, aes(x = x, y = y, color = chemistry, shape = condition)) + geom_point(size = 5) + 
+  theme_light() + theme(panel.grid = element_blank()) + 
+  scale_color_manual(values = c("orchid4", "violetred3", "orchid3")) + 
+  scale_shape_manual(values = c(17, 19))
+
+p6 <- ggplot(dt, aes(x = x, y = y, color = sex, shape = condition)) + geom_point(size = 5) + 
+  theme_light() + theme(panel.grid = element_blank()) + scale_color_manual(values = c("palevioletred1", "skyblue3")) + 
+  scale_shape_manual(values = c(17, 19))
+```
+
+
+get p values 
+
+```{r}
+caoallp60$estimateMetadataSeparation(sample.meta = meta60, n.permutations = 100)
+caoallp60$plotMetadataSeparation()
+
+caoallp15$estimateMetadataSeparation(sample.meta = meta15, n.permutations = 100)
+caoallp15$plotMetadataSeparation()
+```
+
+
+Shared genes P15 P60
+
+```{r}
+library(data.table)
+de60 <- data.table(de60)
+de15 <- data.table(de15)
+common <- intersect(de15$celltype %>% unique, de60$celltype %>% unique)
+
+de15_2 <- de15[grepl("^AC[0-9]",de15$Gene) == F]
+de15_2 <- de15_2[grepl("Rik$",de15_2$Gene) == F]
+
+de60_2 <- de60[grepl("^AC[0-9]",de60$Gene) == F]
+de60_2 <- de60_2[grepl("Rik$",de60_2$Gene) == F]
+
+
+de60_2 <- de60_2[order(stab.median.rank), .SD, by = celltype]
+de15_2 <- de15_2[order(stab.median.rank), .SD, by = celltype]
+
+sharedgenes <- mapply( function(x,y) intersect(x$Gene, y$Gene),
+x = de15_2[celltype %in% common & abs(log2FoldChange) > 1] %>% split.data.frame(., .$celltype) %>% .[common] %>% lapply(head, 300),
+y = de60_2[celltype %in% common& abs(log2FoldChange) > 1] %>% split.data.frame(., .$celltype) %>% .[common]%>% lapply(head, 300))
+```
+
+
+Volcano plots
+
+
+```{r}
+library(EnhancedVolcano)
+library(ggrastr)
+
+resvol <- de60_2 %>% split.data.frame(., .$celltype) %>% lapply(function(x){
+EnhancedVolcano(x,
+    lab = x$Gene,selectLab = head(x[abs(log2FoldChange) > 1 & pvalue < 0.05]$Gene, 15),
+    x = 'log2FoldChange',
+    y = 'pvalue', pCutoff = 0.05, ylim = c(0,7), FCcutoff = 1, pointSize = 1,
+    col = c('grey80', 'grey80', 'grey80', 'orchid4'), subtitle = "", xlim = c(-7,7), colAlpha = 1, boxedLabels = TRUE, drawConnectors = TRUE)
+}) %>% 
+  mapply(function(x,y) x+ ggtitle(y), 
+         x = .,
+         y = names(de60_2 %>% split.data.frame(., .$celltype)), SIMPLIFY = F)
+
+
+resvol2 <- lapply(resvol, function(x) rasterize(x, layers='Point', dpi=600))
+
+plot_grid(plotlist = resvol2, nrow = 6)
+```
+
+
+Overlap human 15q
+
+
+```{r}
+library(biomaRt)
+library(nichenetr)
+
+de60sst <- de60[de60$celltype %>% grepl("^Sst_",.),]
+de.high <- de60sst
+
+m_genes <- de.high$Gene
+h_genes <- convert_mouse_to_human_symbols(symbols = m_genes)
+h_genes <- setNames(h_genes, m_genes)
+m_genes <- recode(.x = m_genes, !!!h_genes)
+de.high$Gene <- m_genes
+
+de.high<- de.high %>% na.omit
+de.high <- de.high %>% split.data.frame(., de.high$celltype)
+de.high <- de.high %>% lapply(., function(x) x[x$Gene %>% duplicated == F, ]) %>% lapply(., function(x) column_to_rownames(x, "Gene"))
+```
+
+
+```{r}
+overrep.test <- function(n, gene.set, deh) {
+  high.top <- deh %>%
+    .[!sapply(., is.logical)] %>%
+    lapply(function(x) {
+      x %>%
+        .[complete.cases(.), ] %>%
+        .[1:n, ]
+    }) %>%
+    .[sapply(., nrow) > 0] %>%
+    lapply(rownames)
+
+  high.olap <- high.top %>%
+    lapply(function(x) sum(x %in% gene.set))
+
+  high.p <- lapply(high.olap, function(x) phyper(
+    x - 1,
+    length(gene.set),
+    (2e4 - length(gene.set)),
+    n,
+    lower.tail = FALSE
+  ))
+high.p <- high.p %>% p.adjust(method = "BH")
+  message(paste0("Number of significant overrep. cell types: ", sum(high.p <= 0.05, na.rm = TRUE)))
+  message("Significant cell types (ordered):")
+  message(
+    high.p %>% 
+      unlist() %>% 
+      .[order(.)] %>% 
+      .[. <= 0.05] %>% 
+      .[!is.na(.)] %>% 
+      names() %>% 
+      paste0(collapse = "\n")
+  )
+
+  return(high.p)
+}
+
+de.high_up <- lapply(de.high, function(x) x[x$log2FoldChange>0,])
+de.high_down <- lapply(de.high, function(x) x[x$log2FoldChange<0,])
+```
+
+split in up and down
+
+```{r}
+#dataframes for DE genes are downloaded from the Batiuk et al and Ruzicka et al online supplementary data and loaded into this notebook 
+
+#batiuk
+medium_de_batiuk <- medium_de_batiuk %>% data.table()
+medium_de_batiuk <- medium_de_batiuk[medium_de_batiuk$Cell_type == "SST" & order(pvalue),]
+medium_de_batiuk_test <- medium_de_batiuk[pvalue<0.05]
+batiuk_up <- medium_de_batiuk[log2FoldChange>0]
+batiuk_down <- medium_de_batiuk[log2FoldChange<0]
+
+#ruzicka
+de_ruzicka<- de_ruzicka %>% data.table()
+de_ruzicka <- de_ruzicka[order(Meta_P.Value)]
+de_ruzicka_test <- de_ruzicka_test[Meta_P.Value<0.05]
+de_ruzicka_test_up <- de_ruzicka_test[Meta_logFC>0]
+de_ruzicka_test_down <- de_ruzicka_test[Meta_logFC<0]
+```
+
+do tests
+
+```{r}
+ruzup <- overrep.test(length(de_ruzicka_test_up$gene), de_ruzicka_test_up$gene, de.high_up)
+ruzdown <- overrep.test(length(de_ruzicka_test_down$gene), de_ruzicka_test_down$gene, de.high_down)
+
+batup <- overrep.test(length(batiuk_up$Gene), batiuk_up$Gene, de.high_up)
+batdown <- overrep.test(length(batiuk_down$Gene), batiuk_down$Gene, de.high_down)
+
+dt <- lapply(list(Ruzicka_up = ruzup, Ruzicka_down = ruzdown, Batiuk_up = batup, Batiuk_down = batdown), function(x) data.frame(x) %>% rownames_to_column(., var = "type")) %>% rbindlist(., idcol = "Data")
+```
+
+plot 
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Add calculated columns to your dataframe
+dt <- dt %>%
+  mutate(
+    logp = -log10(x),
+    sig_label = case_when(
+      x < 0.001 ~ "***",
+      x < 0.01 ~ "**",
+      x < 0.05 ~ "*",
+      TRUE ~ ""
+    ),
+    fill_color = ifelse(logp > 1.3, logp, NA)  # NA for grey
+  )
+
+# Create plot
+ggplot(dt, aes(x = Data, y = type)) +
+  geom_tile(aes(fill = fill_color), color = "black") +
+  scale_fill_gradient(
+    name = "-log10(p)", 
+    low = "thistle", 
+    high = "#36648b", 
+    na.value = "grey95",
+    limits = c(1.3, max(dt$logp, na.rm = TRUE))
+  ) +
+  geom_text(aes(label = sig_label), vjust = 0.5, size = 4) +
+  theme_minimal() +
+  labs(x = "", y = "") + theme(axis.text.x = element_text(angle= 90, hjust = 1, vjust = 0.5))
+
+```
+
+
